@@ -1321,6 +1321,19 @@ function iTF:updateRaidIcon(unitID)
 		end
 	end
 end
+--! WotLK fix: guid в 3.3.5a -- это '0x' + 16 hex, а не розничный 'Creature-0-2-3-4-<entry>-...'.
+-- Раскладку сняли по журналу клиента, следу dll и Warmane-комбатлогу (замер 02.10, подробности --
+-- docs/TECHNICAL.md, п. 7.22): 4 hex типа (F130 существо / F140 пет / F110 геймобъект), затем 6 hex
+-- «какое это существо», затем 6 hex номера спавна. Поле существа постоянно для одного имени (у
+-- существ -- 215/220 имён, у пэтов -- 34/37), хвост не постоянен ни для одного (0/294). Розничный
+-- sub(8,12) брал пять разрядов вместо шести: у существа это численно то же самое (старшая пара поля
+-- равна '00' во всех 1 803 598 guid), у пэта -- теряла разряд в 1 307 случаях из 564 081, и весь ответ
+-- зависел от наличия '0x', которого в рознице нет. Префикс снимаем, поле берём шестью разрядами.
+function iTF:npcIDFromGUID(guid)
+	if type(guid) ~= 'string' then return nil end
+	local hex = (guid:gsub('^0[xX]', ''))
+	return tonumber(string.sub(hex, 5, 10), 16)
+end
 function iTF:updateUnitID(unitID)
 	iTF:hideAll(unitID)
 	-- C_NamePlate comes from the optional AWNamePlateAPI shim. Called straight from NAME_PLATE_UNIT_ADDED,
@@ -1332,12 +1345,9 @@ function iTF:updateUnitID(unitID)
 	end
 	iTF.frames[unitID].unitName = UnitName(unitID) or UNKNOWN
 	iTF.frames[unitID].guid = UnitGUID(unitID) or '0'
-	--! WotLK fix: guid в 3.3.5a -- это 16 hex-символов ('F130007F9A0048E0'), а не розничный
-	-- 'Creature-1-2-3-4-<entry>-...', поэтому розничный срез sub(8,12) берёт не те байты, а при
-	-- UnitGUID() == nil (юнита уже нет) даёт пустую строку -> string.format("%i", nil) роняет весь
-	-- OnShow. Число теперь гарантированно есть; что в нём на самом деле лежит -- вопрос к замеру в игре,
-	-- угадывать раскладку guid по памяти не будем.
-	local npcID = tonumber(string.sub(iTF.frames[unitID].guid, 8, 12), 16)
+	-- Число теперь гарантированно есть всегда: при UnitGUID() == nil (юнита уже нет) был пустой срез, и
+	-- string.format("%i", nil) ронял весь OnShow. Раскладку -- см. iTF:npcIDFromGUID выше.
+	local npcID = iTF:npcIDFromGUID(iTF.frames[unitID].guid)
 	iTF.frames[unitID].npcID = npcID and string.format("%i", npcID) or '0'
 	iTF.frames[unitID].waitingFor = {
 		['border'] = {},
@@ -1416,7 +1426,7 @@ function iTF:CreateNew(unitID, i)
 	iTF.frames[unitID].text = iTF.frames[unitID].healthBar:CreateFontString()
 	iTF.frames[unitID].text:SetFont(iTFConfig.layout.text.font, iTFConfig.layout.text.size,  iTFConfig.layout.text.flags)
 	iTF.frames[unitID].text:SetPoint(iTFConfig.layout.text.pos, iTF.frames[unitID], iTFConfig.layout.text.pos, iTFConfig.layout.text.x,iTFConfig.layout.text.y)
-	iTF.frames[unitID].text:SetText('test')
+	iTF.frames[unitID].text:SetText('')
 	iTF.frames[unitID].text:SetTextColor(unpack(iTFConfig.layout.colors.text.main))
 	
 	--Health Text
@@ -1599,7 +1609,14 @@ function iTF:OnUpdate(elapsed)
 					-- Fill the frame here, but only when updateUnitID will accept it -- so it runs once per
 					-- plate, never re-enters hideAll, and does not flicker on plates that stay invisible.
 					-- nameplateAPI() rather than the proxy, because the proxy table is always truthy.
-					if not v.customData and nameplateAPI() and C_NamePlate.GetNamePlateForUnit
+					--! WotLK fix: 'not v.customData' alone refilled a frame exactly once per frame object.
+					-- The client can hand the same nameplateN slot to another unit without a second
+					-- NAME_PLATE_UNIT_ADDED, and then the frame kept the old name, guid, npcID and class
+					-- colour while health and auras stayed live (they are polled by token) -- reported
+					-- 02.10 in Ruby Sanctum: Halion's plate was labelled "Chaos Invoker" until the plate
+					-- refreshed by itself. So refill on an identity change as well; the price is one
+					-- UnitGUID per shown frame per 0.3s tick, against the 85ns/guid measured for this path.
+					if (not v.customData or (UnitGUID(k) and UnitGUID(k) ~= v.guid)) and nameplateAPI() and C_NamePlate.GetNamePlateForUnit
 						and C_NamePlate.GetNamePlateForUnit(k) then
 						iTF:updateUnitID(k)
 					end
@@ -1634,7 +1651,7 @@ end
 -- iTFCurrentlyAlive ('itfN' -> слот, 0 -- свободен); после стягивания при смерти юнита это уже не индекс
 -- создания из nameplateID. Якорить по индексу создания -- значит разбросать фреймы по сетке заново, то
 -- есть вернуть ровно те дырки, из-за которых стягивание и делалось (обе ветки, 'size' и 'pos', раньше
--- брали position именно по nameplateID).
+-- брали position именно по nameplateID). Оговорка по FrameXML 3.3.5a: хозяин этих таблиц -- secure-среда iTF.mainFrame, RestrictedExecution.lua:583-593 читает из `base[k] or working[k]` и пишет только в working, настоящего _G там нет, -- значит чтение ниже скорее всего видит nil; не заметно это лишь потому, что обе ветки кончаются updateMainFrameAttributes(true), чей newMax-путь раздаёт слоты заново из secure-среды (развязку решает прогон, п. 13 д листа TEST-NAMEPLATE).
 local function frameSlot(frame)
 	local alive = iTFCurrentlyAlive
 	local slot = alive and alive['itf' .. frame.nameplateID]
@@ -1644,8 +1661,8 @@ end
 function iTF:updateFrames(toUpdate)
 	if not toUpdate or toUpdate == 'size' then
 		--Update background size
-		local width = (iTFConfig.layout.frame.width+iTFConfig.layout.frame.hspacing)*math.ceil(iTFConfig.layout.maxUnits/iTFConfig.layout.colS)
-		local height = (iTFConfig.layout.frame.height+iTFConfig.layout.frame.vspacing)*iTFConfig.layout.colS
+		local width = (iTFConfig.layout.frame.width+iTFConfig.layout.frame.hspacing)*(iTFConfig.layout.invertGrow and iTFConfig.layout.colS or math.ceil(iTFConfig.layout.maxUnits/iTFConfig.layout.colS)) --! WotLK fix: оси фона берутся из той же раскладки, что и позиции: getUFPos при invertGrow кладёт colS клеток по горизонтали, а прежняя формула всегда рисовала ceil(maxUnits/colS) колонок, то есть при invertGrow серый прямоугольник был транспонирован относительно сетки и не покрывал часть рамок. Ловит run_itf_layout_check.js, п. 7.25.
+		local height = (iTFConfig.layout.frame.height+iTFConfig.layout.frame.vspacing)*(iTFConfig.layout.invertGrow and math.ceil(iTFConfig.layout.maxUnits/iTFConfig.layout.colS) or iTFConfig.layout.colS)
 		iTF.mainFrame:SetSize(width, height)
 		local i = 1
 		for k,v in pairs(iTF.frames) do
@@ -1714,8 +1731,8 @@ function iTF:updateFrames(toUpdate)
 	if not toUpdate or toUpdate == 'pos' then
 		iTF.mainFrame:ClearAllPoints()
 		iTF.mainFrame:SetPoint(iTFConfig.layout.grow, UIParent, 'BOTTOMLEFT', iTFConfig.layout.anchor.x, iTFConfig.layout.anchor.y)
-		local width = (iTFConfig.layout.frame.width+iTFConfig.layout.frame.hspacing)*math.ceil(iTFConfig.layout.maxUnits/iTFConfig.layout.colS)
-		local height = (iTFConfig.layout.frame.height+iTFConfig.layout.frame.vspacing)*iTFConfig.layout.colS
+		local width = (iTFConfig.layout.frame.width+iTFConfig.layout.frame.hspacing)*(iTFConfig.layout.invertGrow and iTFConfig.layout.colS or math.ceil(iTFConfig.layout.maxUnits/iTFConfig.layout.colS)) --! WotLK fix: оси фона берутся из той же раскладки, что и позиции: getUFPos при invertGrow кладёт colS клеток по горизонтали, а прежняя формула всегда рисовала ceil(maxUnits/colS) колонок, то есть при invertGrow серый прямоугольник был транспонирован относительно сетки и не покрывал часть рамок. Ловит run_itf_layout_check.js, п. 7.25.
+		local height = (iTFConfig.layout.frame.height+iTFConfig.layout.frame.vspacing)*(iTFConfig.layout.invertGrow and math.ceil(iTFConfig.layout.maxUnits/iTFConfig.layout.colS) or iTFConfig.layout.colS)
 		iTF.mainFrame:SetSize(width, height)
 		for k,v in pairs(iTF.frames) do
 			local posX, posY = iTF:getUFPos(frameSlot(v))
@@ -2111,8 +2128,17 @@ function iTF:updateNameplateStateDrivers(update, configMode)
 		for i = 1, 60 do
 			if not update then
 			iTF:CreateNew('nameplate' .. i,i)
+			iTF.mainFrame:SetFrameRef('itf' .. i, iTF.frames['nameplate' .. i])
 			end
-			RegisterStateDriver(iTF.mainFrame, 'itf'..i, '[@nameplate'..i..', exists, nodead'..conds..'] true;')
+			--! WotLK fix: порядок строго такой: SetFrameRef -> SetAttribute('_onstate-…') ->
+			-- RegisterStateDriver. В 3.3.5a регистрация вычисляет условие СИНХРОННО
+			-- (SecureStateDriver.lua:139-151), а SecureHandler_StateOnAttributeChanged
+			-- (SecureHandlers.lua:166-170) дёргает '_onstate-<состояние>', только если атрибут с таким
+			-- именем уже установлен. Пока обработчик шёл вторым, первый переход каждого из 60 драйверов
+			-- терялся: плейт, который уже на экране в момент (пере)инициализации, не получал слота и не
+			-- получал его до конца боя. Если вторым шёл SetFrameRef, тот же переход попадал в сниппет
+			-- раздачи, где self:GetFrameRef(stateid) ещё nil, и `f:ClearAllPoints()` рвал его на первом
+			-- же показанном плейте.
 			iTF.mainFrame:SetAttribute('_onstate-itf'..i,[=[
 			local f = self:GetFrameRef(stateid)
 
@@ -2127,16 +2153,20 @@ function iTF:updateNameplateStateDrivers(update, configMode)
 			end
 			control:RunAttribute('_itfupdate')
 			]=])
-			if not update then
-				iTF.mainFrame:SetFrameRef('itf' .. i, iTF.frames['nameplate' .. i])
-			end
+			--! WotLK fix: у условия обязательна ветка после ';'. Менеджер состояний присваивает атрибут
+			-- только когда новое значение truthy (`if (newValue and newValue ~= oldValue)`,
+			-- SecureStateDriver.lua:99), а строка '] true;' при ложном условии даёт пустое -- то есть
+			-- переход «плейт умер / исчез» клиент не доставляет вообще, iTFCurrentlyShowing держит
+			-- мёртвый токен в слоте, и стяжка не может убрать клетку: это и есть дырка в сетке. Явное
+			-- 'false' даёт ненулевое значение, обработчик освобождает слот и прячет рамку.
+			RegisterStateDriver(iTF.mainFrame, 'itf'..i, '[@nameplate'..i..', exists, nodead'..conds..'] true;false')
 		end
 	end
 end
 function iTF:CreateMainFrame()
 	iTF.mainFrame = CreateFrame('frame', 'iTFMainFrame', UIParent, 'SecureHandlerStateTemplate')
-	local width = (iTFConfig.layout.frame.width+iTFConfig.layout.frame.hspacing)*math.ceil(iTFConfig.layout.maxUnits/iTFConfig.layout.colS)
-	local height = (iTFConfig.layout.frame.height+iTFConfig.layout.frame.vspacing)*iTFConfig.layout.colS
+	local width = (iTFConfig.layout.frame.width+iTFConfig.layout.frame.hspacing)*(iTFConfig.layout.invertGrow and iTFConfig.layout.colS or math.ceil(iTFConfig.layout.maxUnits/iTFConfig.layout.colS)) --! WotLK fix: оси фона по той же схеме, что getUFPos при invertGrow (подробность -- в ветке 'size' ниже по файлу)
+	local height = (iTFConfig.layout.frame.height+iTFConfig.layout.frame.vspacing)*(iTFConfig.layout.invertGrow and math.ceil(iTFConfig.layout.maxUnits/iTFConfig.layout.colS) or iTFConfig.layout.colS)
 	iTF.mainFrame:SetSize(width, height)
 	iTF.mainFrame:SetPoint(iTFConfig.layout.grow, UIParent, 'BOTTOMLEFT', iTFConfig.layout.anchor.x, iTFConfig.layout.anchor.y)
 	iTF.mainFrame.tex = iTF.mainFrame:CreateTexture()
@@ -2178,6 +2208,10 @@ function addon:ADDON_LOADED(addonName)
 			['targetChanged'] = {},
 		}
 		iTF:LoadDefaults()
+		--! WotLK fix: карта имён чёрного списка строится по iTFConfig.blacklist, а вызывается только из
+		-- интерфейса чёрного списка (options.lua). Без этого вызова на старте запись, добавленную в прошлой
+		-- сессии, весь следующий коннект не фильтровала ничего: iTF.blacklistNames оставался пустым.
+		iTF:refreshBlacklist()
 		addon:UnregisterEvent('ADDON_LOADED')
 		durationShowDecimals = iTFConfig.layout.icon.durationDecimals
 		iTF.UFbd = {

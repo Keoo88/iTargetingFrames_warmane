@@ -22,12 +22,29 @@ function iTF:LoadDefaults(force)
 	end
 	local defaults = iTF:GetProfile()
 	if force then
+		--! WotLK fix: reset в бою отказывается целиком, до первой записи конфига. Половинчатый reset --
+		-- layout уже дефолтный, а secure-сетка ещё под СТАРЫЙ maxUnits -- это ровно та дырка, из-за которой
+		-- пересборку и добавляли (плейты сверх старого лимита вечно ждут слота), и в бою её нечем исправить,
+		-- пока игрок не выйдет из боя: ветки 'size'/'pos' пишут атрибуты secure-хендла. Конфиг iTF в бою
+		-- закрыт тем же правилом, которым закрыт вход в окно настроек (iTargetingFrames.lua:2422 и :2453-2456).
+		if InCombatLockdown() then
+			iTF:print(L.combatLockdown)
+			return
+		end
 		if iTFConfig.frame then
 			iTFConfig = nil
 			iTFConfig = {}
 		end
 		iTFConfig.layout = defaults
-		iTF:updateFrames('conditionals')
+		--! WotLK fix: раньше здесь стоял только updateFrames('conditionals'), и этого мало: сетка живёт не
+		-- только в layout -- циклы `for i = 1, %d` в сниппете '_itfupdate' собраны под СТАРЫЙ maxUnits, а
+		-- iTFUnitPositions в secure-среде посчитаны по старой геометрии. Без пересборки сброс с maxUnits=6
+		-- на дефолтные 25 оставлял плейты 7..25 вечно ждать в очереди («моб есть, рамки нет»), а сброс с 40
+		-- на 25 -- якорить показанные рамки по старой сетке за новым прямоугольником mainFrame.
+		-- updateFrames() без аргумента проходит и 'conditionals', и все ветки макета, а 'size'/'pos'
+		-- заканчиваются ровно тем iTF:updateMainFrameAttributes(true), которым пользуется слайдер maxUnits --
+		-- тот же приём, что в штатной загрузке профиля, а не выдуманный.
+		iTF:updateFrames()
 	elseif not iTFConfig.layout then
 		if not iTFConfig.layout then
 			iTFConfig.layout = {}
@@ -947,7 +964,11 @@ function optionFuncs.getOptions()
 					step = 1,
 					set = function(val)
 						iTFConfig.layout.maxUnits = val
-						iTF:updateMainFrameAttributes(true)
+						--! WotLK fix: updateMainFrameAttributes(true) отсюда убран: следующим же вызовом идёт
+						-- updateFrames('size'), а он заканчивается ровно этим. Прежняя пара пересобирала сетку
+						-- дважды на каждый тик слайдера: newMax-ветка прячет все 60 рамок, обнуляет
+						-- iTFCurrentlyShowing и раздаёт слоты заново в порядке pairs(), то есть каждый шаг
+						-- слайдера перетасовывал показанные рамки по клеткам дважды.
 						iTF:updateFrames('size')
 					end,
 					get = function() return iTFConfig.layout.maxUnits end,

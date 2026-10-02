@@ -1,4 +1,3 @@
-<img width="1145" height="860" alt="nameplates" src="https://github.com/user-attachments/assets/c3a8a5cb-f2a0-4296-a37c-dea60f03308a" />
 <img width="902" height="773" alt="itf-settings" src="https://github.com/user-attachments/assets/726736cf-f6b6-46a0-93bb-c8186f6d8901" />
 <img width="313" height="319" alt="itf-preview" src="https://github.com/user-attachments/assets/cdfc0391-6bb4-45dc-9666-bd31e14bc374" />
 <img width="1146" height="861" alt="interaction" src="https://github.com/user-attachments/assets/829e0c2a-a86a-4bbf-81d1-bbdd8071d622" />

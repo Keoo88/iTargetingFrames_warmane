@@ -26,11 +26,27 @@
 ## English
 
 <p align="center">
+  <a href="#contents">Contents</a> ·
   <a href="#features">Features</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#installation">Installation</a> ·
   <a href="#credits">Credits</a>
 </p>
+
+<a name="contents"></a>
+### What this repository ships
+
+| Piece | Goes to | What it is |
+| --- | --- | --- |
+| `iTargetingFrames/` | `\Interface\AddOns\` | the addon itself |
+| `AWNamePlateAPI/` | `\Interface\AddOns\` | pure-Lua shim that exposes `C_NamePlate` and stable `nameplateN` tokens on top of the data published by the dll, plus the `/interact` channel. No C function pointers in addon data, so nothing here can trigger the secure-error path |
+| `AwesomeCVar/` | `\Interface\AddOns\` | `/awesome` panel for the six controls the dll registers: `nameplateDistance`, `cameraFov`, `cameraIndirectVisibility`, `cameraIndirectAlpha`, `interactionMode`, `interactionAngle` |
+| `AwesomeWotlkLib.dll` | client root, next to `Wow.exe` | the library the two addons above read from: nameplate scope and distance, camera fade, smart interact, `@cursor` / `@playerlocation` macro support, clipboard in UTF-8 |
+
+iTargetingFrames loads without any of that, but then it falls back to the stock 3.3.5a
+nameplate lookups and can show one unit in several frames; the shim plus the dll are what make
+the unit tokens (`nameplate1` … `nameplate60`) stable for the whole session. The dll is optional
+by design -- every feature it adds is guarded, so the addons also run on a client without it.
 
 ### About
 
@@ -118,15 +134,20 @@ raid icons. Text flags cover none, outline, thick outline and monochrome.
 <a name="installation"></a>
 ### Installation
 
-1. Download the latest release (or clone this repository).
-2. Unpack the archive.
-3. Move the **iTargetingFrames** folder into:
+1. Download the latest release (or clone this repository) and unpack it.
+2. Copy `AwesomeWotlkLib.dll` into the client root, next to `Wow.exe`.
+3. Copy the three addon folders into `\Interface\AddOns\`:
    ```
-   \Interface\AddOns\
+   \Interface\AddOns\iTargetingFrames\
+   \Interface\AddOns\AWNamePlateAPI\
+   \Interface\AddOns\AwesomeCVar\
    ```
-4. Enable the addon on the character select screen and start the game.
+4. Enable them on the character select screen and start the game. The dll settings are
+   compiled in; there is no config file to place. `/awesome` opens the controls, `/itf`
+   opens the frames settings.
 
 The final path has to look like `\Interface\AddOns\iTargetingFrames\iTargetingFrames.toc`.
+The addon prints an error banner on load if the client has no `C_NamePlate` support at all.
 
 ### Compatibility
 
@@ -146,11 +167,28 @@ The final path has to look like `\Interface\AddOns\iTargetingFrames\iTargetingFr
 ## Русский
 
 <p align="center">
+  <a href="#содержимое">Содержимое</a> ·
   <a href="#возможности">Возможности</a> ·
   <a href="#команды">Команды</a> ·
   <a href="#установка">Установка</a> ·
   <a href="#благодарности">Благодарности</a>
 </p>
+
+<a name="содержимое"></a>
+### Что лежит в репозитории
+
+| Что | Куда кладём | Что это |
+| --- | --- | --- |
+| `iTargetingFrames/` | `\Interface\AddOns\` | сам аддон |
+| `AWNamePlateAPI/` | `\Interface\AddOns\` | чистый Lua-шим, который отдаёт `C_NamePlate` и стабильные токены `nameplateN` поверх данных, публикуемых dll, плюс канал `/interact`. В аддонских данных нет C-указателей, поэтому ни один путь не уходит в secure-ошибку |
+| `AwesomeCVar/` | `\Interface\AddOns\` | панель `/awesome` для шести контролов, которые регистрирует dll: `nameplateDistance`, `cameraFov`, `cameraIndirectVisibility`, `cameraIndirectAlpha`, `interactionMode`, `interactionAngle` |
+| `AwesomeWotlkLib.dll` | в корень клиента, рядом с `Wow.exe` | библиотека, из которой первые два аддона читают данные: область и дальность неймплейтов, фейд камеры, умный interact, поддержка `@cursor` / `@playerlocation` в макросах, буфер обмена в UTF-8 |
+
+iTargetingFrames загрузится и без этого, но тогда он уходит в штатные поиск неймплейтов 3.3.5a
+и может показать одного юнита несколько раз; именно шим вместе с dll держит токены
+(`nameplate1` … `nameplate60`) стабильными всю сессию. Dll по задумке опциональна -- каждое
+фичевое обращение защищено, поэтому аддоны работают и на клиенте без неё. Настройки dll зашиты
+в неё же, файла конфигурации нет.
 
 ### Об аддоне
 
@@ -238,15 +276,19 @@ API 3.3.5a.
 <a name="установка"></a>
 ### Установка
 
-1. Скачайте последний релиз (или клонируйте репозиторий).
-2. Распакуйте архив.
-3. Переместите папку **iTargetingFrames** в:
+1. Скачайте последний релиз (или клонируйте репозиторий) и распакуйте архив.
+2. Положите `AwesomeWotlkLib.dll` в корень клиента, рядом с `Wow.exe`.
+3. Положите три папки аддонов в `\Interface\AddOns\`:
    ```
-   \Interface\AddOns\
+   \Interface\AddOns\iTargetingFrames\
+   \Interface\AddOns\AWNamePlateAPI\
+   \Interface\AddOns\AwesomeCVar\
    ```
-4. Включите аддон на экране выбора персонажа и запустите игру.
+4. Включите их на экране выбора персонажа и запустите игру. Настройки dll зашиты в неё,
+   размещать файл конфигурации не нужно. `/awesome` -- контролы, `/itf` -- настройки рамок.
 
 Итоговый путь должен выглядеть так: `\Interface\AddOns\iTargetingFrames\iTargetingFrames.toc`.
+Если у клиента нет поддержки `C_NamePlate` вообще, аддон при загрузке печатает баннер ошибки.
 
 ### Совместимость
 

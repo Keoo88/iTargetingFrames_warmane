@@ -1,9 +1,3 @@
-<img width="1146" height="861" alt="interaction" src="https://github.com/user-attachments/assets/10408e21-ccc5-4e87-94d5-673211a46532" />
-<img width="1148" height="868" alt="camera" src="https://github.com/user-attachments/assets/1ff930d7-97fe-497c-9a2a-88538573927a" />
-<img width="1145" height="860" alt="nameplates" src="https://github.com/user-attachments/assets/f7fbc2cb-329c-4da7-b945-945cb859e98a" />
-
-
-
 <p align="center">
   <img src="https://github.com/user-attachments/assets/cdfc0391-6bb4-45dc-9666-bd31e14bc374" alt="iTargetingFrames" width="260">
 </p>

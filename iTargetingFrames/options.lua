@@ -70,6 +70,7 @@ function iTF:LoadDefaults(force)
 		temp[k] = v
 	end
 	iTFConfig.blacklist = temp
+	iTF:refreshBlacklist()
 	local npcTemp = {}
 	for k,v in pairs(iTF.priorityNPCs) do
 		npcTemp[k] = v
@@ -2135,6 +2136,7 @@ function optionFuncs.getOptions()
 									iTFConfig.blacklist = {}
 									iTFConfig.blacklist[val] = true
 								end
+								iTF:refreshBlacklist()
 							end,
 							get = function() 
 								return ''
@@ -3315,6 +3317,7 @@ function iTF:toggleConfig(forceHide)
 						else
 							iTFConfig.blacklist[v.id] = nil
 						end
+						iTF:refreshBlacklist()
 						fillContent(keys)
 					end)
 					f.content.exitButton[exitButton]:Show()

@@ -5,6 +5,7 @@
 ## Backport: Cheeta
 ## Version: 0.1
 ## DefaultState: enabled
+## OptionalDeps: AWNamePlateAPI
 ## SavedVariables: iTFConfig
 
 embeds.xml

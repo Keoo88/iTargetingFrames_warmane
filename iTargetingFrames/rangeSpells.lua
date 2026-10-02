@@ -105,10 +105,12 @@ local maxRanges = {
 		interrupt = 1766,	--Kick (Melee)
 		dps = 1329,			--Mutilate (Melee)
 	},
-	[260] = { --Combat 
-		utility = 2094,		--Pistol Shot (20yd)
+	[260] = { --Combat
+		--! WotLK fix: Saber Slash (193315) is a Legion ability, so GetSpellInfo gave nil here and the
+		-- maxRangeDPS indicator was dead for combat rogues. Sinister Strike is its 3.3.5a equivalent.
+		utility = 2094,		--Blind (Melee)
 		interrupt = 1766,	--Kick (Melee)
-		dps = 193315,		--Saber Slash (Melee)
+		dps = 1752,			--Sinister Strike (Melee)
 	},
 	[261] = { --Sublety
 		utility = 36554,	--Shadowstep (25yd)
@@ -168,12 +170,16 @@ local maxRanges = {
 }
 local function convertIdsToNames(t)
 	local temp = {}
-	for k,v in pairs(maxRanges) do
+	for k,v in pairs(t) do
 		if type(v) == 'table' then
 			temp[k] = {}
 			for dK,dV in pairs(v) do
 				if type(dV) == 'number' then
 					temp[k][dK] = GetSpellInfo(dV)
+				else
+					--! WotLK fix: carry non-spell fields through. The tank flag was dropped right here, so
+					-- specID.tank was never set and the "tank only" / "non tanks" role filters were inverted.
+					temp[k][dK] = dV
 				end
 			end
 		end

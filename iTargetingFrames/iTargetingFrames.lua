@@ -10,13 +10,19 @@ iTF.font = NumberFont_Shadow_Small:GetFont()
 iTF.fontSize = 11
 local L = LibStub('AceLocale-3.0'):GetLocale('iTargetingFrames', true)
 local AceTimer = LibStub("AceTimer-3.0") --added
-local WorldFrame = WorldFrame
-local WorldGetChildren = WorldFrame.GetChildren
-local WorldGetNumChildren = WorldFrame.GetNumChildren
-local lastChildern, numChildren = 0, 0
-local C_NamePlate = C_NamePlate -- https://github.com/FrostAtom/awesome_wotlk
+-- Was: WorldFrame.GetChildren/GetNumChildren aliases and a child-count watch. The only thing it fed was
+-- plateID, and plateID was dead weight on this client (see the currentTarget branch below), so the whole
+-- scan is gone: it rebuilt the full WorldFrame child list on every change of its length.
+-- Was: `local C_NamePlate = C_NamePlate`. Our dll registers that global from its per-frame callback, which
+-- runs AFTER addons load, so the alias captured nil on a fresh Lua state and every later use died with
+-- "attempt to index upvalue 'C_NamePlate' (a nil value)" (measured: this file, line 389, on a click). Keep the
+-- same local name so nothing else in the file changes, but resolve it through the global at call time.
+local function nameplateAPI() return rawget(_G, "C_NamePlate") end
+local C_NamePlate = setmetatable({}, { __index = function(_, key)
+	local api = nameplateAPI()
+	if api then return api[key] end
+end })
 
-iTF.CreatedPlates = {}
 local specID = {
 	id = 0,
 }
@@ -302,7 +308,9 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 						if show then
 							indicatorFuncs:glows(k, cond, unitID, conditionals.onUpdate.interruptRange.color)
 						else
-							indicatorFuncs:glows(k, nil, nil, true)
+							--! WotLK fix: glows() takes (k, cond, unitID, ...) and bails on a nil unitID, so the
+							-- old (k, nil, nil, true) call returned at once and the glow never went out.
+							indicatorFuncs:glows(k, cond, unitID, nil, true)
 						end
 					end
 				end
@@ -342,7 +350,8 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 						if show then
 							indicatorFuncs:glows(k, cond, unitID, conditionals.onUpdate.maxRangeDPS.color)
 						else
-							indicatorFuncs:glows(k, nil, nil, true)
+							--! WotLK fix: same swapped-argument hide call as in interruptRange above.
+							indicatorFuncs:glows(k, cond, unitID, nil, true)
 						end
 					end
 				end
@@ -351,7 +360,9 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 	elseif cond == 'outOfCombat' then
 		if conditionals.onUpdate.outOfCombat and unitID then
 			local show = false
-			if not iTF.encounterInProgress and not UnitAffectingCombat(unitID) then
+			--! WotLK fix: dropped the iTF.encounterInProgress term -- 3.3.5a has no ENCOUNTER_START/STOP
+			-- event, so the flag was always false and the test did nothing.
+			if not UnitAffectingCombat(unitID) then
 				show = true
 			end
 			for k in pairs(conditionals.onUpdate.outOfCombat.indicators) do
@@ -385,16 +396,21 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 	elseif cond == 'currentTarget' then
 		if conditionals.targetChanged.currentTarget then
 			local show = false
+			--! WotLK fix: розница связывает цель с фреймом через UnitFrame.plateID / UnitFrame.unit, и на
+			-- 3.3.5a непригодны обе ветки: plateID в этом файле никогда не увеличивается (единственная
+			-- запись -- в iTF:NewPlate, значение 0, ключ получался 'nameplate-1'), а в .unit лежит строка
+			-- запроса -- замер 01.10 23:14: у индикатора манекена там "target", а не токен. Ключ фрейма
+			-- берётся из карты guid->токен, которую публикует dll: GetNamePlateTokenByGUID(UnitGUID("target"))
+			-- ответил "nameplate1", а iTF строит фреймы под эти же ключи (CreateNew('nameplate'..i)).
 			if UnitExists('target') then
-				local nameplate = C_NamePlate.GetNamePlateForUnit('target')
-				if nameplate and nameplate.UnitFrame then
-					if nameplate.UnitFrame.plateID then
-						unitID = 'nameplate' .. nameplate.UnitFrame.plateID-1
-					elseif nameplate.UnitFrame.unit then
-						unitID = nameplate.UnitFrame.unit
-					end
+				local getToken = C_NamePlate.GetNamePlateTokenByGUID
+				local guid = UnitGUID('target')
+				local token = getToken and guid and getToken(guid)
+				if token then
+					unitID = token
 					show = true
-					--nameplate = nil
+				elseif unitID and UnitIsUnit(unitID, 'target') then
+					show = true
 				end
 			end
 			for k in pairs(conditionals.targetChanged.currentTarget.indicators) do
@@ -436,7 +452,10 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 					end
 				end
 			end
-			iTF.currentTarget = unitID
+			--! WotLK fix: в памяти держим только тот фрейм, который реально подсветили. Прежняя строка
+			-- записывала и юнит, который только что погасили, -- при пересчёте чужого фрейма (updateUnitID
+			-- и цикл OnUpdate) следующий сброс приходился на неверный ключ, и подсветка оставалась на старой цели.
+			iTF.currentTarget = show and unitID or nil
 		end
 	elseif cond == 'maxRange' then
 		if conditionals.onUpdate.maxRange then
@@ -450,7 +469,9 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 			end]]
 			if conditionals.onUpdate.maxRange.invert then
 				if type(specID.utility) == 'table' then
-					if IsSpellInRange(specID.utility.min, k) == 0 or IsSpellInRange(specID.utility.min, k) == 0 then
+					--! WotLK fix: was IsSpellInRange(specID.utility.min, k) twice -- k is not in scope here
+					-- (nil), and .max was never read. Both copies of this branch had it.
+					if IsSpellInRange(specID.utility.min, unitID) == 0 or IsSpellInRange(specID.utility.max, unitID) == 0 then
 						show = true
 					end
 				elseif IsSpellInRange(specID.utility, unitID) == 0 then
@@ -458,7 +479,7 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 				end
 			else
 				if type(specID.utility) == 'table' then
-					if IsSpellInRange(specID.utility.min, k) == 1 or IsSpellInRange(specID.utility.min, k) == 1 then
+					if IsSpellInRange(specID.utility.min, unitID) == 1 or IsSpellInRange(specID.utility.max, unitID) == 1 then
 						show = true
 					end
 				elseif IsSpellInRange(specID.utility, unitID) == 1 then
@@ -540,16 +561,17 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 	elseif cond == 'focusTarget' then
 		if conditionals.focusUpdate.focusTarget then
 			local show = false
+			--! WotLK fix: та же связка, что и для currentTarget выше: guid фокуса -> токен из данных dll.
+			-- Прежняя ветка к тому же индексировала nameplate.UnitFrame.unit без проверки UnitFrame.
 			if UnitExists('focus') then
-				local nameplate = C_NamePlate.GetNamePlateForUnit('focus')
-				if nameplate then
-					if nameplate.UnitFrame and nameplate.UnitFrame.plateID then
-						unitID = 'nameplate' .. nameplate.UnitFrame.plateID-1
-					elseif nameplate.UnitFrame.unit then
-						unitID = nameplate.UnitFrame.unit
-					end
+				local getToken = C_NamePlate.GetNamePlateTokenByGUID
+				local guid = UnitGUID('focus')
+				local token = getToken and guid and getToken(guid)
+				if token then
+					unitID = token
 					show = true
-					--nameplate = nil
+				elseif unitID and UnitIsUnit(unitID, 'focus') then
+					show = true
 				end
 			end
 			for k in pairs(conditionals.focusUpdate.focusTarget.indicators) do
@@ -564,7 +586,7 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 					end
 				elseif k == 'alpha' then
 					if iTF.focusTarget then
-						indicatorFuncs:opacity(nil,iTF.focusTarget, true)
+						indicatorFuncs:opacity(cond, iTF.focusTarget, nil, true)
 					end
 					if show then
 						indicatorFuncs:opacity(cond, unitID, conditionals.focusUpdate.focusTarget.alpha)
@@ -591,7 +613,8 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 					end
 				end
 			end
-			iTF.focusTarget = unitID
+			--! WotLK fix: как в currentTarget -- держать в памяти только подсвеченный фрейм.
+			iTF.focusTarget = show and unitID or nil
 		end
 	elseif cond and customConditionals[cond] then
 		--local func, error = getFunction(customConditionals[cond].func, unitID)
@@ -600,7 +623,13 @@ local function updateIndicator(unitID, cond, customCondIndicators, showCustom)
 			--iTF:print('Custom conditional' .. cond ..  'causing error: ' .. error)
 			--return
 		--end
-		local show, color, alpha = customConditionals[cond].funct(unitID, iTF.frames[unitID].customData)
+		-- A custom conditional reads through customData, which only exists once updateUnitID has filled the
+		-- frame. Until then there is nothing to evaluate, and indexing the nil is what spammed the error.
+		local customData = iTF.frames[unitID] and iTF.frames[unitID].customData
+		if not customData then
+			return
+		end
+		local show, color, alpha = customConditionals[cond].funct(unitID, customData)
 		for k in pairs(customConditionals[cond].indicators) do
 			if k == 'border' then
 				if show then
@@ -738,7 +767,9 @@ local function utf8_charbytes (s, i)
       return 4
    end
 end
-local function utf8_len (s)
+--! WotLK fix: chars was read as a global here (always nil) -- it is a parameter in the utf8 library this
+-- was copied from. Made it one again; the single caller passes no second argument, so nothing changes.
+local function utf8_len (s, chars)
    local pos = 1
    local bytes = string.len(s)
    local len = 0
@@ -835,7 +866,9 @@ function iTF:setName(unitID, setIt)
 
 	if setIt then
 		iTF.frames[unitID].unitName = UnitName(unitID)
-		iTF.frames[unitID].customData.name = UnitName(unitID)
+		if iTF.frames[unitID].customData then
+			iTF.frames[unitID].customData.name = UnitName(unitID)
+		end
 	end
 	iTF.frames[unitID].text:SetText(name or UNKNOWN)
 	iTF:trimText(unitID)
@@ -860,19 +893,25 @@ function iTF:updateHealth(unitID)
 			value = hp/maxHP
 		end
 		iTF.frames[unitID].healthBar:SetValue(value)
-		if conditionals.onHealth.custom then
-			for k,v in pairs(conditionals.onHealth.custom) do
-				if v.func(unitID) then
-					updateIndicator('custom' .. k, unitID, v.indicators, true)
-				else
-					updateIndicator('custom' .. k, unitID, v.indicators)
-				end
+		--! WotLK fix: dropped a dead block here. It looped conditionals.onHealth.custom -- a literal key
+		-- that never exists (real ones are custom1, custom2) -- and called updateIndicator with the first
+		-- two arguments swapped. Every caller already loops conditionals.onHealth itself.
+		if iTFConfig.layout.healthText.enabled then
+			--! WotLK fix: same per-poll reformat as the aura countdown. The string only changes when the
+			-- rounded percentage does, so compare first; customData.health further down still updates every
+			-- poll because custom conditionals read it as a number, not as text.
+			local rounded = round(value*100)
+			if iTF.frames[unitID].healthValue ~= rounded then
+				iTF.frames[unitID].healthValue = rounded
+				iTF.frames[unitID].healthText:SetFormattedText(iTF.healthTextString, value*100)
 			end
 		end
-		if iTFConfig.layout.healthText.enabled then
-			iTF.frames[unitID].healthText:SetFormattedText(iTF.healthTextString, value*100)
+		-- customData belongs to updateUnitID, and with our dll a nameplate token can resolve (UnitExists is
+		-- already true) a moment before C_NamePlate.GetNamePlateForUnit has a visible plate for it. Such a
+		-- frame is legitimately shown but not yet filled, so health must not assume otherwise.
+		if iTF.frames[unitID].customData then
+			iTF.frames[unitID].customData.health = value*100
 		end
-		iTF.frames[unitID].customData.health = value*100
 	end
 end
 local aurasToUpdate = {}
@@ -882,7 +921,7 @@ function iTF:sortAurasByTime(temp, unitID)
 		local noDuration = {}
 		for k,v in spairs(temp, function(t,a,b) if iTFConfig.layout.icon.sort.ascending then return t[b].expirationTime > t[a].expirationTime end return t[b].expirationTime < t[a].expirationTime end) do
 			if v.expirationTime > 0 then
-				if id > iTFConfig.layout.icon.max then return end
+				if id > iTFConfig.layout.icon.max then break end -- break, not return: the hide loop below still has to run
 				if not iTF.frames[unitID].auras[id] then
 					iTF:CreateAuraFrame(unitID, id)
 				end
@@ -896,7 +935,7 @@ function iTF:sortAurasByTime(temp, unitID)
 			end
 		end
 		for i = 1, #noDuration do -- Sort auras without duration to last
-			if id > iTFConfig.layout.icon.max then return end
+			if id > iTFConfig.layout.icon.max then break end -- break, not return: the hide loop below still has to run
 			local v = noDuration[i]
 			if not iTF.frames[unitID].auras[id] then
 				iTF:CreateAuraFrame(unitID, id)
@@ -908,7 +947,9 @@ function iTF:sortAurasByTime(temp, unitID)
 		end
 		for i = id, #iTF.frames[unitID].auras do
 			iTF.frames[unitID].auras[i]:Hide()
-			iTF:setDurationInfo(unitID, id, nil, nil, true)
+			-- was `id`: every leftover slot then cleared the duration of the SAME slot, so the others kept
+			-- an expired endTime in aurasToUpdate and their text counted down through zero into negatives.
+			iTF:setDurationInfo(unitID, i, nil, nil, true)
 		end
 	else
 		for i = 1, #iTF.frames[unitID].auras do
@@ -921,7 +962,7 @@ function iTF:sortAurasByName(temp, unitID)
 	if #temp > 0 then
 		local id = 1
 		for k,v in spairs(temp, function(t,a,b) if iTFConfig.layout.icon.sort.ascending then return t[b].name > t[a].name end return t[b].name < t[a].name end) do
-			if id > iTFConfig.layout.icon.max then return end
+			if id > iTFConfig.layout.icon.max then break end -- break, not return: the hide loop below still has to run
 			if not iTF.frames[unitID].auras[id] then
 				iTF:CreateAuraFrame(unitID, id)
 			end
@@ -932,7 +973,9 @@ function iTF:sortAurasByName(temp, unitID)
 		end
 		for i = id, #iTF.frames[unitID].auras do
 			iTF.frames[unitID].auras[i]:Hide()
-			iTF:setDurationInfo(unitID, id, nil, nil, true)
+			-- was `id`: every leftover slot then cleared the duration of the SAME slot, so the others kept
+			-- an expired endTime in aurasToUpdate and their text counted down through zero into negatives.
+			iTF:setDurationInfo(unitID, i, nil, nil, true)
 		end
 	else
 		for i = 1, #iTF.frames[unitID].auras do
@@ -943,8 +986,12 @@ function iTF:sortAurasByName(temp, unitID)
 end
 function iTF:setDurationInfo(unitID, aura, endTime, stack, hide)
 	if iTF.frames[unitID].auras[aura].anim then
-		iTF.frames[unitID].auras[aura].flash:Stop()					
+		iTF.frames[unitID].auras[aura].flash:Stop()
 	end
+	-- The countdown text cache in OnUpdate is per slot, so it has to be dropped whenever the slot is
+	-- re-pointed at another aura or taken out of use -- otherwise the next aura reuses the previous
+	-- number in its first frame.
+	iTF.frames[unitID].auras[aura].textValue = nil
 	if hide then
 		if aura then
 			if aura == 1 then
@@ -984,20 +1031,89 @@ function iTF:setDurationInfo(unitID, aura, endTime, stack, hide)
 		iTF.frames[unitID].auras[aura]:SetAlpha(1)		
 	end
 end
-function iTF:updateAuras(unitID)
-	local tempAuraTable = {}
-	for i = 1, 41 do
-		local name, _, icon, count, debuffType, duration, expirationTime, _, _, _, spellID = UnitDebuff(unitID, i, 'player')
-		if not name then
-			if iTFConfig.layout.icon.sort.time then
-				iTF:sortAurasByTime(tempAuraTable, unitID)
-			else
-				iTF:sortAurasByName(tempAuraTable, unitID)
+function iTF:applyAuras(unitID, tempAuraTable)
+	-- updateAuras() is polled from OnUpdate (0.3s), and sortAuras*() restarts the flash animation of every
+	-- slot it touches (setDurationInfo stops it, the countdown plays it again). Without this check auras
+	-- would stutter instead of flashing, so an unchanged set is simply not re-applied.
+	local shown = iTF.frames[unitID].auraShown
+	local n = #tempAuraTable
+	if shown and #shown == n then
+		for i = 1, n do
+			local a, b = shown[i], tempAuraTable[i]
+			if a.name ~= b.name or a.expirationTime ~= b.expirationTime or a.count ~= b.count then
+				shown = nil
+				break
 			end
+		end
+		if shown then return end
+	end
+	shown = {}
+	for i = 1, n do
+		local v = tempAuraTable[i]
+		shown[i] = { ['name'] = v.name, ['expirationTime'] = v.expirationTime, ['count'] = v.count }
+	end
+	iTF.frames[unitID].auraShown = shown
+	if iTFConfig.layout.icon.sort.time then
+		iTF:sortAurasByTime(tempAuraTable, unitID)
+	else
+		iTF:sortAurasByName(tempAuraTable, unitID)
+	end
+end
+--! WotLK fix: UnitDebuff returns no spellID on 3.3.5a, so an id-keyed blacklist entry can only be matched
+-- by name. Resolved once on change instead of per aura read -- updateAuras runs 3 times a second per plate.
+iTF.blacklistNames = {}
+function iTF:refreshBlacklist()
+	local t = {}
+	if iTFConfig and iTFConfig.blacklist then
+		for k,v in pairs(iTFConfig.blacklist) do
+			local id = v and tonumber(k)
+			local name = id and GetSpellInfo(id)
+			if name then t[name] = true end
+		end
+	end
+	iTF.blacklistNames = t
+end
+--! WotLK fix: updateAuras runs 5 times a second per plate and used to build a fresh table plus one subtable
+-- per aura on every call -- pure garbage for the collector on Lua 5.1. The buffer and its subtables are now
+-- reused: only the fields are overwritten. applyAuras() copies out everything it keeps (auraShown, the sort
+-- keys, the icon and duration passed to setDurationInfo), so holding the rows alive across polls is safe.
+local function clearAuraBuffer(t)
+	for i = #t, 1, -1 do
+		t[i] = nil
+	end
+end
+function iTF:updateAuras(unitID)
+	local buffer = iTF.auraBuffer
+	if not buffer then
+		buffer = {}
+		iTF.auraBuffer = buffer
+	else
+		clearAuraBuffer(buffer)
+	end
+	local n = 0
+	for i = 1, 41 do
+		--! WotLK fix: UnitDebuff returns 9 values here, not 11 -- position 11 (spellID) was always nil, so
+		-- the id-keyed blacklist never matched anything; iTF.blacklistNames covers it now. The filter token
+		-- also has to be upper case -- 'player' matched nothing, so every plate showed the whole raid's debuffs.
+		local name, _, icon, count, _, duration, expirationTime = UnitDebuff(unitID, i, 'PLAYER')
+		if not name then
+			iTF:applyAuras(unitID, buffer)
 			break
 		else
-			if not iTFConfig.blacklist[name] and not iTFConfig.blacklist[spellID] then
-				table.insert(tempAuraTable, {['name'] = name, ['icon'] = icon, ['duration'] = duration, ['expirationTime'] = expirationTime > 0 and expirationTime or -1, ['count'] = count, ['start'] = expirationTime - duration, ['stack'] = count})
+			if not iTFConfig.blacklist[name] and not iTF.blacklistNames[name] then
+				n = n + 1
+				local row = buffer[n]
+				if not row then
+					row = {}
+					buffer[n] = row
+				end
+				row.name = name
+				row.icon = icon
+				row.duration = duration
+				row.expirationTime = expirationTime > 0 and expirationTime or -1
+				row.count = count
+				row.start = expirationTime - duration
+				row.stack = count
 			end
 		end
 	end
@@ -1110,7 +1226,9 @@ function iTF:CreateAuraFrame(unitID, id)
 
 	iTF.frames[unitID].auras[id].fadeIn = iTF.frames[unitID].auras[id].flash:CreateAnimation("ALPHA")
 	iTF.frames[unitID].auras[id].fadeIn:SetDuration(flashSpeed)
-	iTF.frames[unitID].auras[id].fadeOut:SetChange(1)
+	--! WotLK fix: was fadeOut:SetChange(1), which overwrote the fade-out with a fade-in and left fadeIn at
+	-- its default. The icon dimmed and stayed dim instead of pulsing.
+	iTF.frames[unitID].auras[id].fadeIn:SetChange(1)
 	iTF.frames[unitID].auras[id].fadeIn:SetOrder(2)
 
 end
@@ -1144,7 +1262,6 @@ function iTF:getUFPos(id)
 	else --BOTTOMLEFT
 		return x, y
 	end
-	return posX, posY
 end
 function iTF:hideAll(frame, loop)
 	if loop then
@@ -1206,13 +1323,22 @@ function iTF:updateRaidIcon(unitID)
 end
 function iTF:updateUnitID(unitID)
 	iTF:hideAll(unitID)
-	if not UnitExists(unitID) or not C_NamePlate.GetNamePlateForUnit(unitID) then
+	-- C_NamePlate comes from the optional AWNamePlateAPI shim. Called straight from NAME_PLATE_UNIT_ADDED,
+	-- this is the one path that can run with the shim disabled, and then it is a nil call, not a missing
+	-- plate -- same guard the 'target'/'focus' lookups above already use.
+	local getPlate = C_NamePlate.GetNamePlateForUnit
+	if not getPlate or not UnitExists(unitID) or not getPlate(unitID) then
 		return
 	end
 	iTF.frames[unitID].unitName = UnitName(unitID) or UNKNOWN
 	iTF.frames[unitID].guid = UnitGUID(unitID) or '0'
-	local npcID = string.format("%i", tonumber(string.sub(iTF.frames[unitID].guid, 8, 12), 16))
-	iTF.frames[unitID].npcID = npcID or 0
+	--! WotLK fix: guid в 3.3.5a -- это 16 hex-символов ('F130007F9A0048E0'), а не розничный
+	-- 'Creature-1-2-3-4-<entry>-...', поэтому розничный срез sub(8,12) берёт не те байты, а при
+	-- UnitGUID() == nil (юнита уже нет) даёт пустую строку -> string.format("%i", nil) роняет весь
+	-- OnShow. Число теперь гарантированно есть; что в нём на самом деле лежит -- вопрос к замеру в игре,
+	-- угадывать раскладку guid по памяти не будем.
+	local npcID = tonumber(string.sub(iTF.frames[unitID].guid, 8, 12), 16)
+	iTF.frames[unitID].npcID = npcID and string.format("%i", npcID) or '0'
 	iTF.frames[unitID].waitingFor = {
 		['border'] = {},
 		['alpha'] = {},
@@ -1414,32 +1540,11 @@ function iTF:CreateNew(unitID, i)
 	--RegisterUnitWatch(iTF.frames[unitID], true)
 end
 
-local plateID = 0
-function iTF:NewPlate(frame)
-	frame.UnitFrame.plateID = plateID
-	iTF.CreatedPlates[frame] = true
-end
-
-local function findNewPlate(...)
-	for i = lastChildern + 1, numChildren do
-		local frame = select(i, ...)
-		local region = frame:GetRegions()
-		if region and region:GetObjectType() == "Texture" and region:GetTexture() == OVERLAY and not iTF.CreatedPlates[frame] then
-			iTF:NewPlate(frame)
-		end
-	end
-end
-
 local onUpdateTotal = 0
 function iTF:OnUpdate(elapsed)
-	numChildren = WorldGetNumChildren(WorldFrame)
-	if lastChildern ~= numChildren then
-		findNewPlate(WorldGetChildren(WorldFrame))
-		lastChildern = numChildren
-	end
 
 	if not iTF.playerSpecLoaded then
-		if not C_NamePlate then
+		if not nameplateAPI() then
 			print('-- Error iTargetingFrames --\nRequires a patched client with the AwesomeWotlkLib.dll. If units are shown more than once, you need the modified file with fixed nameplate units.')
 		end
 		iTF:CheckTalents()
@@ -1451,26 +1556,69 @@ function iTF:OnUpdate(elapsed)
 		for id, endTime in pairs(v) do
 			if endTime > 0 then
 				local showTime = endTime - cTime
-				if iTFConfig.layout.icon.flashEnabled and showTime <= iTFConfig.layout.icon.flashTimer then 
-					if not iTF.frames[unitID].auras[id].anim then
-						iTF.frames[unitID].auras[id].flash:Play()
-					end
-				end
-				if showTime < iTFConfig.layout.icon.durationDecimals then
-					iTF.frames[unitID].auras[id].cooldownText:SetFormattedText('%.1f', showTime)
+				if showTime <= 0 then
+					-- Expired: clear the entry here too. Whatever path forgot to do it, a dead entry must not
+					-- sit in aurasToUpdate printing a counter that runs through zero into negatives.
+					iTF.frames[unitID].auras[id].cooldownText:Hide()
+					v[id] = nil
 				else
-					iTF.frames[unitID].auras[id].cooldownText:SetFormattedText('%.0f', showTime)
+					if iTFConfig.layout.icon.flashEnabled and showTime <= iTFConfig.layout.icon.flashTimer then
+						if not iTF.frames[unitID].auras[id].anim then
+							iTF.frames[unitID].auras[id].flash:Play()
+						end
+					end
+					--! WotLK fix: the countdown was re-formatted every frame for every aura, though the visible
+					-- number changes 1-10 times a second. Format only when the rendered string would differ;
+					-- slot.textValue is cleared wherever a slot is shown, hidden or reused (setDurationInfo).
+					local slot = iTF.frames[unitID].auras[id]
+					local text
+					if showTime < iTFConfig.layout.icon.durationDecimals then
+						text = string.format('%.1f', showTime)
+					else
+						text = string.format('%.0f', showTime)
+					end
+					if slot.textValue ~= text then
+						slot.textValue = text
+						slot.cooldownText:SetText(text)
+					end
 				end
 			end
 		end
 	end
-	if onUpdateTotal >= 0.2 then
+	if onUpdateTotal >= 0.3 then
+		--! WotLK fix: tank role is a stance on 3.3.5a, so it is re-read here rather than taken from the
+		-- spec. Skipped entirely while no threat conditional is on, which is the default.
+		if next(conditionals.threat) then
+			iTF:updateTankRole()
+		end
 		for k,v in pairs(iTF.frames) do
 			if UnitExists(k) then
 				if v.isShown then
+					-- OnShow's own guard (iTF.frames[...].added) can fire before C_NamePlate has a visible
+					-- plate for the token, which is exactly the case with our dll: the token resolves first.
+					-- Fill the frame here, but only when updateUnitID will accept it -- so it runs once per
+					-- plate, never re-enters hideAll, and does not flicker on plates that stay invisible.
+					-- nameplateAPI() rather than the proxy, because the proxy table is always truthy.
+					if not v.customData and nameplateAPI() and C_NamePlate.GetNamePlateForUnit
+						and C_NamePlate.GetNamePlateForUnit(k) then
+						iTF:updateUnitID(k)
+					end
 					iTF:updateHealth(k) --Health onUpdate, Since no UnitHealth events for nameplate unit
+					-- Same reason as the health poll right above: the client never sends UNIT_AURA for a
+					-- nameplate token, so updateAuras() ran exactly twice -- on plate creation and on the
+					-- rare event for another unit. A debuff that expired afterwards kept its icon forever
+					-- (measured 29.09 ~23:5x: an icon with no duration text on a training dummy -- the text
+					-- was gone because the countdown hit zero, the icon was left behind by the missing poll).
+					iTF:updateAuras(k)
 					for l,_ in pairs(conditionals.onHealth) do
 						updateIndicator(k, l)
+					end
+
+					--! WotLK fix: the client sends no UNIT_THREAT_LIST_UPDATE for a nameplate token either,
+					-- so the threat conditionals were evaluated once per plate -- at spawn, when threat is
+					-- still 0. aggro / losingAggro / gainingAggro never lit up at all.
+					for cond,_ in pairs(conditionals.threat) do
+						updateIndicator(k, cond)
 					end
 
 					for cond,_ in pairs(conditionals.onUpdate) do
@@ -1482,6 +1630,17 @@ function iTF:OnUpdate(elapsed)
 		onUpdateTotal = 0
 	end
 end
+--! WotLK fix: какой слот сетки занят этим фреймом ПРЯМО СЕЙЧАС. Ведёт его безопасный драйвер в
+-- iTFCurrentlyAlive ('itfN' -> слот, 0 -- свободен); после стягивания при смерти юнита это уже не индекс
+-- создания из nameplateID. Якорить по индексу создания -- значит разбросать фреймы по сетке заново, то
+-- есть вернуть ровно те дырки, из-за которых стягивание и делалось (обе ветки, 'size' и 'pos', раньше
+-- брали position именно по nameplateID).
+local function frameSlot(frame)
+	local alive = iTFCurrentlyAlive
+	local slot = alive and alive['itf' .. frame.nameplateID]
+	if type(slot) == 'number' and slot > 0 then return slot end
+	return frame.nameplateID
+end
 function iTF:updateFrames(toUpdate)
 	if not toUpdate or toUpdate == 'size' then
 		--Update background size
@@ -1490,7 +1649,7 @@ function iTF:updateFrames(toUpdate)
 		iTF.mainFrame:SetSize(width, height)
 		local i = 1
 		for k,v in pairs(iTF.frames) do
-			local posX, posY = iTF:getUFPos(v.nameplateID)
+			local posX, posY = iTF:getUFPos(frameSlot(v))
 			if UnitExists(k) then
 				iTF:setName(k)
 			end
@@ -1559,7 +1718,7 @@ function iTF:updateFrames(toUpdate)
 		local height = (iTFConfig.layout.frame.height+iTFConfig.layout.frame.vspacing)*iTFConfig.layout.colS
 		iTF.mainFrame:SetSize(width, height)
 		for k,v in pairs(iTF.frames) do
-			local posX, posY = iTF:getUFPos(v.nameplateID)
+			local posX, posY = iTF:getUFPos(frameSlot(v))
 			iTF.frames[k]:ClearAllPoints()
 			iTF.frames[k]:SetPoint(iTFConfig.layout.grow, iTF.mainFrame, iTFConfig.layout.grow, posX, posY)
 		end
@@ -1635,7 +1794,9 @@ function iTF:updateFrames(toUpdate)
 		end
 	end
 	if not toUpdate or toUpdate == 'target' then
-		updateIndicator('currentTarget')
+		--! WotLK fix: updateIndicator takes (unitID, cond) -- the condition name was passed as the unitID,
+		-- so this refresh did nothing and the target indicator only caught up on the next target change.
+		updateIndicator(nil, 'currentTarget')
 	end
 	if not toUpdate or toUpdate == 'raidIcon' then
 		for k in pairs(iTF.frames) do
@@ -1705,8 +1866,9 @@ function iTF:updateFrames(toUpdate)
 			['focusUpdate'] = {},
 			['onShow'] = {},
 		}
-		customCondtionals = nil
-		customCondtionals = {}
+		--! WotLK fix: was customCondtionals -- a typo, i.e. a separate global nobody reads. The real table
+		-- was never cleared, so a custom conditional kept firing after being switched off, until /reload.
+		customConditionals = {}
 		iTF:hideAll(nil,true)
 		for k,v in pairs(iTFConfig.layout.conditionals) do
 			if v.enable then
@@ -1837,6 +1999,7 @@ function iTF:updateFrames(toUpdate)
 					end
 				end
 				--prio: general < class < spec
+				if not iTFConfig.bindings[iTF.class] then iTFConfig.bindings[iTF.class] = {['b'] = {}} end
 				applyBindings(iTFConfig.bindings.general)
 				applyBindings(iTFConfig.bindings[iTF.class].b)
 				applyBindings(iTFConfig.bindings[iTF.class][specID.specID])
@@ -1857,6 +2020,27 @@ function iTF:updateFrames(toUpdate)
 end
 function iTF:updateMainFrameAttributes(newMax)
 	iTF.mainFrame:SetAttribute('_itfupdate', string.format([[
+		-- Показ юнита занимает первый свободный слот, а при его смерти слот просто пустеет: до конца сетки
+		-- оставалась дырка, пока в этот же индекс не попадал новый плейт. Сначала стягиваем показанные в
+		-- начало (1..n без пропусков), потом уже раздаём свободные. Идея -- из вилки
+		-- vanvonlj/iTargetingFrames-wotlk, коммит "Compact frames on death to remove gaps" (#2).
+		local writeSlot = 1
+		for i = 1, %d do
+			local tok = iTFCurrentlyShowing[i]
+			if tok then
+				if i ~= writeSlot then
+					iTFCurrentlyShowing[writeSlot] = tok
+					iTFCurrentlyShowing[i] = nil
+					iTFCurrentlyAlive[tok] = writeSlot
+					local mf = self:GetFrameRef(tok)
+					if mf then
+						mf:ClearAllPoints()
+						mf:SetPoint('%s', self, '%s', iTFUnitPositions[writeSlot][1], iTFUnitPositions[writeSlot][2])
+					end
+				end
+				writeSlot = writeSlot + 1
+			end
+		end
 		for i = 1, %d do
 			if not iTFCurrentlyShowing[i] then
 				local f
@@ -1876,7 +2060,7 @@ function iTF:updateMainFrameAttributes(newMax)
 				end
 			end
 		end
-	]], iTFConfig.layout.maxUnits,iTFConfig.layout.grow,iTFConfig.layout.grow))
+	]], iTFConfig.layout.maxUnits,iTFConfig.layout.grow,iTFConfig.layout.grow,iTFConfig.layout.maxUnits,iTFConfig.layout.grow,iTFConfig.layout.grow))
 	local tempTable = [[iTFUnitPositions = table.new();]]
 	for i = 1, 60 do
 		local x,y = iTF:getUFPos(i)
@@ -1967,7 +2151,10 @@ function iTF:CreateMainFrame()
 	iTF.mainFrame:SetScript('OnUpdate', iTF.OnUpdate)
 end
 function iTF:registerEvents(unregister)
-	local events = {'UNIT_HEALTH','UNIT_HEALTH_FREQUENT','UNIT_SPELLCAST_START','UNIT_SPELLCAST_STOP','UNIT_SPELLCAST_INTERRUPTED','UNIT_SPELLCAST_CHANNEL_START','UNIT_SPELLCAST_CHANNEL_STOP','UNIT_AURA','ENCOUNTER_START','ENCOUNTER_STOP','RAID_TARGET_UPDATE','PLAYER_LOGIN','PLAYER_TARGET_CHANGED','UNIT_THREAT_LIST_UPDATE','PLAYER_FOCUS_CHANGED','PLAYER_REGEN_DISABLED', 'NAME_PLATE_UNIT_ADDED', 'NAME_PLATE_UNIT_REMOVED', 'CHAT_MSG_ADDON'}
+	--! WotLK fix: six names dropped. UNIT_HEALTH_FREQUENT, ENCOUNTER_START and ENCOUNTER_STOP do not exist
+	-- on 3.3.5a at all; UNIT_HEALTH, UNIT_AURA and UNIT_THREAT_LIST_UPDATE never carry a nameplate token, so
+	-- their handlers could never match -- that work is done by the 0.3s poll in OnUpdate instead.
+	local events = {'UNIT_SPELLCAST_START','UNIT_SPELLCAST_STOP','UNIT_SPELLCAST_INTERRUPTED','UNIT_SPELLCAST_CHANNEL_START','UNIT_SPELLCAST_CHANNEL_STOP','RAID_TARGET_UPDATE','PLAYER_LOGIN','PLAYER_TARGET_CHANGED','PLAYER_FOCUS_CHANGED','PLAYER_REGEN_DISABLED', 'NAME_PLATE_UNIT_ADDED', 'NAME_PLATE_UNIT_REMOVED', 'CHAT_MSG_ADDON'}
 	if unregister then
 		for i = 1, #events do
 			addon:UnregisterEvent(events[i])
@@ -2017,14 +2204,6 @@ function addon:ADDON_LOADED(addonName)
 		iTF:registerEvents()
 		addon:RegisterEvent('ACTIVE_TALENT_GROUP_CHANGED')
 		--RegisterAddonMessagePrefix('iTargetingFrames')
-	end
-end
-function addon:UNIT_HEALTH_FREQUENT(unitID)
-	if iTF.frames[unitID] and iTF.frames[unitID].isShown then
-		iTF:updateHealth(unitID)
-		for k,_ in pairs(conditionals.onHealth) do
-			updateIndicator(unitID, k)
-		end
 	end
 end
 function addon:UNIT_HEALTH(unitID)
@@ -2083,12 +2262,6 @@ function addon:UNIT_SPELLCAST_CHANNEL_STOP(unitID)
 		iTF:updateCast(unitID, true)
 	end
 end
-function addon:ENCOUNTER_START()
-	iTF.encounterInProgress = true
-end
-function addon:ENCOUNTER_STOP()
-	iTF.encounterInProgress = false
-end
 function addon:RAID_TARGET_UPDATE()
 	iTF:updateRaidIcon()
 end
@@ -2130,25 +2303,66 @@ function iTF:PlayerSpec()
 	return spec
 end
 
-function iTF:CheckTalents() 
+--! WotLK fix: tanking on 3.3.5a is a stance, not a spec -- bear and cat are the same talent tab, and all
+-- three DK specs tanked -- so the retail spec id cannot express the role. Read from the active
+-- form/stance/presence aura instead; names come from ids so it works on any client locale.
+local tankAuraIds = {
+	DRUID = {5487, 9634},  --Bear Form, Dire Bear Form
+	WARRIOR = {71},        --Defensive Stance
+	PALADIN = {25780},     --Righteous Fury
+	DEATHKNIGHT = {48263}, --Frost Presence
+}
+local tankAuraNames
+function iTF:updateTankRole()
+	if not iTF.class then return end
+	if not tankAuraNames then
+		tankAuraNames = {}
+		if tankAuraIds[iTF.class] then
+			for _,id in ipairs(tankAuraIds[iTF.class]) do
+				local name = GetSpellInfo(id)
+				if name then
+					table.insert(tankAuraNames, name)
+				end
+			end
+		end
+	end
+	local tank = false
+	for i = 1, #tankAuraNames do
+		if UnitBuff('player', tankAuraNames[i]) then
+			tank = true
+			break
+		end
+	end
+	specID.tank = tank
+end
+
+function iTF:CheckTalents()
 	iTF.class = select(2,UnitClass('player')) --number
 	iTF.specID = iTF:PlayerSpec()
+	--! WotLK fix: привязки готовы применяться и без спека. Была пара строк ниже, и на персонаже без
+	-- определённого спека (низкий уровень, до выбора талантов) ветка не выполнялась вовсе: клавиши
+	-- работали до первого /reload. Столбик класса создаём заранее. Правка из
+	-- vanvonlj/iTargetingFrames-wotlk, коммит "Fix click-to-target lost after /reload".
+	if not iTFConfig.bindings[iTF.class] then
+		iTFConfig.bindings[iTF.class] = {['b'] = {}}
+	end
 	if iTF.specID then
 		specID = {
 			['specID'] = iTF.specID,
 			['utility'] = iTF.spells.range[iTF.specID].utility,
 			['interrupt'] = iTF.spells.range[iTF.specID].interrupt,
 			['dps'] = iTF.spells.range[iTF.specID].dps,
+			--! WotLK fix: the tank flag was never carried over, so specID.tank stayed nil for everyone and
+			-- the threat role filters were inverted. Starting value only -- updateTankRole() refines it.
+			['tank'] = iTF.spells.range[iTF.specID].tank,
 		}
-		if not iTFConfig.bindings[iTF.class] then
-		iTFConfig.bindings[iTF.class] = {['b'] = {}}
-		end
 		if not iTFConfig.bindings[iTF.class][specID.specID] then
 			iTFConfig.bindings[iTF.class][specID.specID] = {}
 		end
-		iTF.playerSpecLoaded = true
-		iTF:updateFrames('bindings')
 	end
+	iTF:updateTankRole()
+	iTF.playerSpecLoaded = true
+	iTF:updateFrames('bindings')
 end
 
 function addon:PLAYER_LOGIN()
